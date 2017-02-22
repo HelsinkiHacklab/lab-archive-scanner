@@ -4,7 +4,7 @@ include PiPiper
 #require 'dropbox_sdk' # not yet
 require 'logger'
 require 'time'
-
+require 'fuzzy_match'
 
 #  gnd ---- 10K ----- BUTTON ----- 3.3V
 #                 ^----PIN23
@@ -35,15 +35,30 @@ watch :pin => 23 do
   stdout, stderr, status = Open3.capture3("scanadf --output-file "+folder_path+tmp_file_name+"_%0d --source=\"ADF Duplex\""+threshold+curve)
   mylog.info("err " + stderr )
   puts "status: "+status.to_s
+
+  puts stderr
   
   # recheck this
-  scanned_files_list = stderr.scan(/^Scanned document (.*)$/) #stderr.split("Scanned document ") # Get list of scanned documents
-  
+  scanned_files_list = stderr.scan(/^Scanned document (.*)$/).flatten   #stderr.split("Scanned document ") # Get list of scanned documents
+  mylog.info("list of scanned documents "+scanned_files_list.join(' '))
 
   # if no output, stderr returns: "Scanned 0 pages" => we can end this now
   if scanned_files_list.length == 0
     puts "Scanner did not find any pages"
   else
+    
+    # Page orientation
+    for sf in scanned_files_list
+      stdout,stderr,status = Open3.capture3("tesseract -l fin+eng "+sf.to_s+" - -psm 0")
+      rot_deg = stderr[/Orientation in degrees\:\s([0-9]*)/,1]
+      rot_conf = stderr[/Orientation confidence\:\s([0-9]*)/,1]
+      if rot_deg != nil && rot_deg.to_i > 10 && rot_conf.to_i > 5
+        # rotate the image if needed
+        mylog.info("Rotating new image "+sf+" by "+rot_deg+" with confidence "+rot_conf)
+        stdout,stderr,status = Open3.capture3("convert "+sf+" -rotate "+rot_deg+" "+sf)
+      end
+    end
+
     # pnm-files converted to single pdf file
     scanned_files_join = scanned_files_list.join(" ")
     stdout, stderr, status = Open3.capture3("convert "+scanned_files_join+" "+folder_path+"tmp_out.pdf")
@@ -52,12 +67,31 @@ watch :pin => 23 do
     stdout, stderr, status = Open3.capture3("pdfsandwich -lang fin+eng "+folder_path+"tmp_out.pdf")
     
     # Also have a combined picture version available
-    stdout, stderr, status = Open3.capture3("convert -trim "+scanned_files_join+" +append "+folder_path+"tmp_out.png")
+    stdout, stderr, status = Open3.capture3("convert -trim "+scanned_files_join+"+append "+folder_path+"tmp_out.png")
     
     # Extract OCR text data
     stdout, stderr, status = Open3.capture3("pdftotext "+folder_path+"tmp_out_ocr.pdf -")
     puts stdout
     ocr_txt = stdout
+   
+    ocr_txt_list = ocr_txt.downcase.scan(/[\w\@äö]{5,99}/)
+    puts ocr_txt_list
+    fuzz = FuzzyMatch.new(ocr_txt_list)
+
+    type = "Yleiset"
+    if    fuzz.find("kevätkokouksen", threshold: 0.8) != nil
+      type = "Säännönmukaiset kokoukset"
+    elsif fuzz.find("syyskokouksen", threshold: 0.8) != nil
+      type = "Säännönmukaiset kokoukset"
+    elsif fuzz.find("pöytäkirja", threshold: 0.7) != nil
+      type = "Pöytäkirjat"
+    elsif fuzz.find("kuitti", threshold: 0.8) != nil
+      type = "Kuitit ja kauppakirjat"
+    elsif fuzz.find("kauppakirja", threshold: 0.6 != nil
+      type = "Kuitit ja kauppakirjat"
+    elsif fuzz.find("käteiskuitti", threshold: 0.6 != nil
+      type = "Kuitit ja kauppakirjat"
+    end
 
     
     # replace all punct/specials/newlines
@@ -65,7 +99,6 @@ watch :pin => 23 do
     # strip preceding and leading whitespace
     # replace double whitespace with one
     final_file_name = ocr_txt.gsub(/[[[:punct:]]\¬\$\^\&\£\<\>\|\+\~\n\r]/,'').gsub(/(\b\w{1}\b)/,'').strip.squeeze(' ')[0,100]
-    # \r \n ?
 
     File.rename(folder_path+"tmp_out_ocr.pdf", folder_path+final_file_name+".pdf")
     File.rename(folder_path+"tmp_out.png", folder_path+final_file_name+".png")
@@ -79,3 +112,4 @@ end
 
 
 PiPiper.wait
+
